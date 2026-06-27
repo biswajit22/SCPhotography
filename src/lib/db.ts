@@ -1,4 +1,18 @@
-// Unified Data Layer for SC Photography (Supabase + LocalStorage Fallback)
+// Unified Data Layer for SC Photography (Firebase Firestore + LocalStorage Fallback)
+
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  getDocs, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  orderBy 
+} from "firebase/firestore";
 
 export interface Photo {
   id: string;
@@ -83,12 +97,6 @@ export interface ContactRequest {
   status: 'unread' | 'read';
   createdAt: string;
 }
-
-// Check for Supabase config
-const hasSupabaseEnv = 
-  typeof window !== 'undefined' &&
-  !!process.env.NEXT_PUBLIC_SUPABASE_URL && 
-  !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 // Default Seed Data
 const DEFAULT_ALBUMS: Album[] = [
@@ -236,9 +244,7 @@ const DEFAULT_VIDEOS: Video[] = [
   { id: 'v2', youtubeId: 'lp-EO5I60KA', title: 'Cinematic Pre Wedding Love Story | Princep Ghat', thumbnail: 'https://images.unsplash.com/photo-1515934751635-c81c6bc9a2d8?q=80&w=800', category: 'pre-wedding' }
 ];
 
-
-
-// Helper to write to local storage
+// Local storage helper functions
 const getLocal = <T>(key: string, fallback: T): T => {
   if (typeof window === 'undefined') return fallback;
   const item = localStorage.getItem(`sc_photo_v3_${key}`);
@@ -250,32 +256,98 @@ const setLocal = <T>(key: string, value: T): void => {
   localStorage.setItem(`sc_photo_v3_${key}`, JSON.stringify(value));
 };
 
+// Check for Firebase Configuration
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+};
 
+const hasFirebase = !!process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
+
+// Initialize Firebase
+const app = hasFirebase ? (getApps().length === 0 ? initializeApp(firebaseConfig) : getApp()) : null;
+const firestore = app ? getFirestore(app) : null;
+
+// Helper to read from Firestore (with automatic seeding if empty)
+const getCollectionData = async <T extends { id: string }>(
+  collectionName: string,
+  defaultData: T[],
+  sortByField?: string
+): Promise<T[]> => {
+  if (!firestore) {
+    return getLocal<T[]>(collectionName, defaultData);
+  }
+
+  try {
+    const colRef = collection(firestore, collectionName);
+    const q = sortByField ? query(colRef, orderBy(sortByField, "desc")) : colRef;
+    const snapshot = await getDocs(q);
+
+    if (snapshot.empty && defaultData.length > 0) {
+      // Auto-seed Firestore with default data if empty
+      for (const item of defaultData) {
+        const { id, ...rest } = item;
+        await setDoc(doc(firestore, collectionName, id), rest);
+      }
+      return defaultData;
+    }
+
+    return snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as unknown as T[];
+  } catch (error) {
+    console.error(`Firebase Firestore read error on collection ${collectionName}:`, error);
+    // fallback to local storage
+    return getLocal<T[]>(collectionName, defaultData);
+  }
+};
 
 export const db = {
   // PHOTOS
   async getPhotos(): Promise<Photo[]> {
-    if (hasSupabaseEnv) {
-      // In a real Supabase mode, we would call:
-      // const { data } = await supabase.from('photos').select('*'); return data;
-    }
-    return getLocal<Photo[]>('photos', DEFAULT_PHOTOS);
+    return getCollectionData<Photo>('photos', DEFAULT_PHOTOS, 'createdAt');
   },
 
   async addPhoto(photo: Omit<Photo, 'id' | 'createdAt'>): Promise<Photo> {
-    const photos = await this.getPhotos();
-    const newPhoto: Photo = {
+    const newPhoto = {
       ...photo,
-      id: 'photo_' + Math.random().toString(36).substr(2, 9),
       createdAt: new Date().toISOString().split('T')[0]
     };
-    photos.unshift(newPhoto);
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'photos'), newPhoto);
+        return { id: docRef.id, ...newPhoto };
+      } catch (error) {
+        console.error("Firebase addPhoto error:", error);
+      }
+    }
+    // Fallback to local storage
+    const photos = await getLocal<Photo[]>('photos', DEFAULT_PHOTOS);
+    const localPhoto: Photo = {
+      ...newPhoto,
+      id: 'photo_' + Math.random().toString(36).substr(2, 9)
+    };
+    photos.unshift(localPhoto);
     setLocal('photos', photos);
-    return newPhoto;
+    return localPhoto;
   },
 
   async deletePhoto(id: string): Promise<boolean> {
-    const photos = await this.getPhotos();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'photos', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deletePhoto error:", error);
+      }
+    }
+    // Fallback to local storage
+    const photos = await getLocal<Photo[]>('photos', DEFAULT_PHOTOS);
     const filtered = photos.filter(p => p.id !== id);
     setLocal('photos', filtered);
     return true;
@@ -283,11 +355,20 @@ export const db = {
 
   // ALBUMS
   async getAlbums(): Promise<Album[]> {
-    return getLocal<Album[]>('albums', DEFAULT_ALBUMS);
+    return getCollectionData<Album>('albums', DEFAULT_ALBUMS);
   },
 
   async addAlbum(album: Omit<Album, 'id'>): Promise<Album> {
-    const albums = await this.getAlbums();
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'albums'), album);
+        return { id: docRef.id, ...album };
+      } catch (error) {
+        console.error("Firebase addAlbum error:", error);
+      }
+    }
+    // Fallback to local storage
+    const albums = await getLocal<Album[]>('albums', DEFAULT_ALBUMS);
     const newAlbum: Album = {
       ...album,
       id: 'album_' + Math.random().toString(36).substr(2, 9)
@@ -299,11 +380,20 @@ export const db = {
 
   // TESTIMONIALS
   async getTestimonials(): Promise<Testimonial[]> {
-    return getLocal<Testimonial[]>('testimonials', DEFAULT_TESTIMONIALS);
+    return getCollectionData<Testimonial>('testimonials', DEFAULT_TESTIMONIALS);
   },
 
   async addTestimonial(testimonial: Omit<Testimonial, 'id'>): Promise<Testimonial> {
-    const testimonials = await this.getTestimonials();
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'testimonials'), testimonial);
+        return { id: docRef.id, ...testimonial };
+      } catch (error) {
+        console.error("Firebase addTestimonial error:", error);
+      }
+    }
+    // Fallback to local storage
+    const testimonials = await getLocal<Testimonial[]>('testimonials', DEFAULT_TESTIMONIALS);
     const newTestimonial: Testimonial = {
       ...testimonial,
       id: 'testimonial_' + Math.random().toString(36).substr(2, 9)
@@ -314,7 +404,16 @@ export const db = {
   },
 
   async deleteTestimonial(id: string): Promise<boolean> {
-    const testimonials = await this.getTestimonials();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'testimonials', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deleteTestimonial error:", error);
+      }
+    }
+    // Fallback to local storage
+    const testimonials = await getLocal<Testimonial[]>('testimonials', DEFAULT_TESTIMONIALS);
     const filtered = testimonials.filter(t => t.id !== id);
     setLocal('testimonials', filtered);
     return true;
@@ -322,24 +421,45 @@ export const db = {
 
   // BLOGS
   async getBlogs(): Promise<Blog[]> {
-    return getLocal<Blog[]>('blogs', DEFAULT_BLOGS);
+    return getCollectionData<Blog>('blogs', DEFAULT_BLOGS, 'date');
   },
 
   async addBlog(blog: Omit<Blog, 'id' | 'slug' | 'date'>): Promise<Blog> {
-    const blogs = await this.getBlogs();
-    const newBlog: Blog = {
+    const newBlog = {
       ...blog,
-      id: 'blog_' + Math.random().toString(36).substr(2, 9),
       slug: blog.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
       date: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     };
-    blogs.unshift(newBlog);
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'blogs'), newBlog);
+        return { id: docRef.id, ...newBlog };
+      } catch (error) {
+        console.error("Firebase addBlog error:", error);
+      }
+    }
+    // Fallback to local storage
+    const blogs = await getLocal<Blog[]>('blogs', DEFAULT_BLOGS);
+    const localBlog: Blog = {
+      ...newBlog,
+      id: 'blog_' + Math.random().toString(36).substr(2, 9),
+    };
+    blogs.unshift(localBlog);
     setLocal('blogs', blogs);
-    return newBlog;
+    return localBlog;
   },
 
   async deleteBlog(id: string): Promise<boolean> {
-    const blogs = await this.getBlogs();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'blogs', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deleteBlog error:", error);
+      }
+    }
+    // Fallback to local storage
+    const blogs = await getLocal<Blog[]>('blogs', DEFAULT_BLOGS);
     const filtered = blogs.filter(b => b.id !== id);
     setLocal('blogs', filtered);
     return true;
@@ -347,11 +467,21 @@ export const db = {
 
   // PACKAGES
   async getPackages(): Promise<Package[]> {
-    return getLocal<Package[]>('packages', DEFAULT_PACKAGES);
+    return getCollectionData<Package>('packages', DEFAULT_PACKAGES);
   },
 
   async updatePackage(updatedPkg: Package): Promise<Package> {
-    const packages = await this.getPackages();
+    if (firestore) {
+      try {
+        const { id, ...rest } = updatedPkg;
+        await setDoc(doc(firestore, 'packages', id), rest);
+        return updatedPkg;
+      } catch (error) {
+        console.error("Firebase updatePackage error:", error);
+      }
+    }
+    // Fallback to local storage
+    const packages = await getLocal<Package[]>('packages', DEFAULT_PACKAGES);
     const updated = packages.map(p => p.id === updatedPkg.id ? updatedPkg : p);
     setLocal('packages', updated);
     return updatedPkg;
@@ -359,11 +489,20 @@ export const db = {
 
   // VIDEOS
   async getVideos(): Promise<Video[]> {
-    return getLocal<Video[]>('videos', DEFAULT_VIDEOS);
+    return getCollectionData<Video>('videos', DEFAULT_VIDEOS);
   },
 
   async addVideo(video: Omit<Video, 'id'>): Promise<Video> {
-    const videos = await this.getVideos();
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'videos'), video);
+        return { id: docRef.id, ...video };
+      } catch (error) {
+        console.error("Firebase addVideo error:", error);
+      }
+    }
+    // Fallback to local storage
+    const videos = await getLocal<Video[]>('videos', DEFAULT_VIDEOS);
     const newVideo: Video = {
       ...video,
       id: 'video_' + Math.random().toString(36).substr(2, 9)
@@ -374,14 +513,33 @@ export const db = {
   },
 
   async deleteVideo(id: string): Promise<boolean> {
-    const videos = await this.getVideos();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'videos', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deleteVideo error:", error);
+      }
+    }
+    // Fallback to local storage
+    const videos = await getLocal<Video[]>('videos', DEFAULT_VIDEOS);
     const filtered = videos.filter(v => v.id !== id);
     setLocal('videos', filtered);
     return true;
   },
 
   async updateVideo(updatedVideo: Video): Promise<Video> {
-    const videos = await this.getVideos();
+    if (firestore) {
+      try {
+        const { id, ...rest } = updatedVideo;
+        await setDoc(doc(firestore, 'videos', id), rest);
+        return updatedVideo;
+      } catch (error) {
+        console.error("Firebase updateVideo error:", error);
+      }
+    }
+    // Fallback to local storage
+    const videos = await getLocal<Video[]>('videos', DEFAULT_VIDEOS);
     const updated = videos.map(v => v.id === updatedVideo.id ? updatedVideo : v);
     setLocal('videos', updated);
     return updatedVideo;
@@ -389,31 +547,61 @@ export const db = {
 
   // BOOKINGS
   async getBookings(): Promise<Booking[]> {
-    return getLocal<Booking[]>('bookings', []);
+    return getCollectionData<Booking>('bookings', [], 'createdAt');
   },
 
   async addBooking(booking: Omit<Booking, 'id' | 'status' | 'createdAt'>): Promise<Booking> {
-    const bookings = await this.getBookings();
-    const newBooking: Booking = {
+    const newBooking = {
       ...booking,
-      id: 'booking_' + Math.random().toString(36).substr(2, 9),
-      status: 'pending',
+      status: 'pending' as const,
       createdAt: new Date().toISOString()
     };
-    bookings.unshift(newBooking);
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'bookings'), newBooking);
+        return { id: docRef.id, ...newBooking };
+      } catch (error) {
+        console.error("Firebase addBooking error:", error);
+      }
+    }
+    // Fallback to local storage
+    const bookings = await getLocal<Booking[]>('bookings', []);
+    const localBooking: Booking = {
+      ...newBooking,
+      id: 'booking_' + Math.random().toString(36).substr(2, 9),
+    };
+    bookings.unshift(localBooking);
     setLocal('bookings', bookings);
-    return newBooking;
+    return localBooking;
   },
 
   async updateBookingStatus(id: string, status: 'pending' | 'confirmed' | 'rejected'): Promise<boolean> {
-    const bookings = await this.getBookings();
+    if (firestore) {
+      try {
+        await updateDoc(doc(firestore, 'bookings', id), { status });
+        return true;
+      } catch (error) {
+        console.error("Firebase updateBookingStatus error:", error);
+      }
+    }
+    // Fallback to local storage
+    const bookings = await getLocal<Booking[]>('bookings', []);
     const updated = bookings.map(b => b.id === id ? { ...b, status } : b);
     setLocal('bookings', updated);
     return true;
   },
 
   async deleteBooking(id: string): Promise<boolean> {
-    const bookings = await this.getBookings();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'bookings', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deleteBooking error:", error);
+      }
+    }
+    // Fallback to local storage
+    const bookings = await getLocal<Booking[]>('bookings', []);
     const filtered = bookings.filter(b => b.id !== id);
     setLocal('bookings', filtered);
     return true;
@@ -421,31 +609,61 @@ export const db = {
 
   // CONTACT REQUESTS
   async getContactRequests(): Promise<ContactRequest[]> {
-    return getLocal<ContactRequest[]>('contacts', []);
+    return getCollectionData<ContactRequest>('contacts', [], 'createdAt');
   },
 
   async addContactRequest(request: Omit<ContactRequest, 'id' | 'status' | 'createdAt'>): Promise<ContactRequest> {
-    const contacts = await this.getContactRequests();
-    const newRequest: ContactRequest = {
+    const newRequest = {
       ...request,
-      id: 'contact_' + Math.random().toString(36).substr(2, 9),
-      status: 'unread',
+      status: 'unread' as const,
       createdAt: new Date().toISOString()
     };
-    contacts.unshift(newRequest);
+    if (firestore) {
+      try {
+        const docRef = await addDoc(collection(firestore, 'contacts'), newRequest);
+        return { id: docRef.id, ...newRequest };
+      } catch (error) {
+        console.error("Firebase addContactRequest error:", error);
+      }
+    }
+    // Fallback to local storage
+    const contacts = await getLocal<ContactRequest[]>('contacts', []);
+    const localRequest: ContactRequest = {
+      ...newRequest,
+      id: 'contact_' + Math.random().toString(36).substr(2, 9),
+    };
+    contacts.unshift(localRequest);
     setLocal('contacts', contacts);
-    return newRequest;
+    return localRequest;
   },
 
   async markContactRequestRead(id: string): Promise<boolean> {
-    const contacts = await this.getContactRequests();
+    if (firestore) {
+      try {
+        await updateDoc(doc(firestore, 'contacts', id), { status: 'read' as const });
+        return true;
+      } catch (error) {
+        console.error("Firebase markContactRequestRead error:", error);
+      }
+    }
+    // Fallback to local storage
+    const contacts = await getLocal<ContactRequest[]>('contacts', []);
     const updated = contacts.map(c => c.id === id ? { ...c, status: 'read' as const } : c);
     setLocal('contacts', updated);
     return true;
   },
 
   async deleteContactRequest(id: string): Promise<boolean> {
-    const contacts = await this.getContactRequests();
+    if (firestore) {
+      try {
+        await deleteDoc(doc(firestore, 'contacts', id));
+        return true;
+      } catch (error) {
+        console.error("Firebase deleteContactRequest error:", error);
+      }
+    }
+    // Fallback to local storage
+    const contacts = await getLocal<ContactRequest[]>('contacts', []);
     const filtered = contacts.filter(c => c.id !== id);
     setLocal('contacts', filtered);
     return true;
