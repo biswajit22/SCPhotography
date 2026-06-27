@@ -16,11 +16,6 @@ export default function BeforeAfter() {
     setSliderPosition(Math.max(0, Math.min(100, position)));
   }, []);
 
-  const handleTouchMove = useCallback((e: TouchEvent) => {
-    if (!isDragging) return;
-    handleMove(e.touches[0].clientX);
-  }, [isDragging, handleMove]);
-
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isDragging) return;
     handleMove(e.clientX);
@@ -30,20 +25,30 @@ export default function BeforeAfter() {
     setIsDragging(false);
   }, []);
 
+  // React touch event handlers for seamless mobile dragging
+  const handleTouchStart = (e: React.TouchEvent) => {
+    setIsDragging(true);
+    if (e.touches && e.touches[0]) {
+      handleMove(e.touches[0].clientX);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches && e.touches[0]) {
+      handleMove(e.touches[0].clientX);
+    }
+  };
+
   useEffect(() => {
     if (isDragging) {
       window.addEventListener("mousemove", handleMouseMove);
       window.addEventListener("mouseup", handleMouseUp);
-      window.addEventListener("touchmove", handleTouchMove);
-      window.addEventListener("touchend", handleMouseUp);
     }
     return () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
-      window.removeEventListener("touchmove", handleTouchMove);
-      window.removeEventListener("touchend", handleMouseUp);
     };
-  }, [isDragging, handleMouseMove, handleMouseUp, handleTouchMove]);
+  }, [isDragging, handleMouseMove, handleMouseUp]);
 
   return (
     <section className="py-24 bg-[#0F0F10] border-t border-gold-accent/5 relative overflow-hidden">
@@ -67,8 +72,12 @@ export default function BeforeAfter() {
         <div
           ref={containerRef}
           className="relative w-full h-[300px] sm:h-[450px] md:h-[550px] rounded-2xl overflow-hidden select-none cursor-ew-resize border border-gold-accent/20 shadow-2xl"
+          style={{ touchAction: "none" }}
           onMouseDown={() => setIsDragging(true)}
-          onTouchStart={() => setIsDragging(true)}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={() => setIsDragging(false)}
+          onTouchCancel={() => setIsDragging(false)}
         >
           {/* Before Image (Raw) - Full Width under */}
           <div className="absolute inset-0 w-full h-full">
